@@ -16,61 +16,81 @@ button { padding:12px 20px; font-size:16px; cursor:pointer; margin-top:20px; }
 <video id="screenVideo" autoplay playsinline></video>
 
 <script>
+// Determine role: host shares screen, others are viewers
 const isHost = location.hash === "#host";
 document.getElementById("roleTitle").innerText = isHost ? "Broadcaster" : "Viewer";
 if(!isHost) document.getElementById("shareBtn").style.display = "none";
 
 const video = document.getElementById("screenVideo");
-const pcs = {};
-const room = "public-demo-room";
+const pcs = {}; // stores peer connections for viewers
+const room = "demo-room";
 
-// Free demo signaling server (WebSocket)
-const ws = new WebSocket("wss://demo.signalingserver.com"); // ⚠️ Replace with your server for production
+// Free public signaling server for demo (replace with your own for production)
+const ws = new WebSocket("wss://o2-signaling.herokuapp.com/");
 
 ws.onopen = () => {
-    ws.send(JSON.stringify({type:isHost?"host-join":"viewer-join", room}));
+  ws.send(JSON.stringify({ type: isHost ? "host-join" : "viewer-join", room }));
 };
 
 ws.onmessage = async e => {
-    const msg = JSON.parse(e.data);
+  const msg = JSON.parse(e.data);
 
-    if(isHost){
-        if(msg.type === "viewer-join"){
-            const pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
-            pcs[msg.id] = pc;
+  if(isHost){
+    // Host side
+    if(msg.type === "viewer-join"){
+      const pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+      pcs[msg.id] = pc;
 
-            pc.onicecandidate = ev => { if(ev.candidate) ws.send(JSON.stringify({type:"ice", target:msg.id, candidate:ev.candidate})) };
+      pc.onicecandidate = ev => {
+        if(ev.candidate) ws.send(JSON.stringify({type:"ice", target:msg.id, candidate:ev.candidate}));
+      };
 
-            video.srcObject.getTracks().forEach(track => pc.addTrack(track, video.srcObject));
+      if(video.srcObject) video.srcObject.getTracks().forEach(track => pc.addTrack(track, video.srcObject));
 
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            ws.send(JSON.stringify({type:"offer", target:msg.id, offer}));
-        }
-        else if(msg.type==="answer") await pcs[msg.id].setRemoteDescription(msg.answer);
-        else if(msg.type==="ice") await pcs[msg.id].addIceCandidate(msg.candidate);
-    } else {
-        if(!window.pc) window.pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
-        const pc = window.pc;
-
-        pc.ontrack = e => video.srcObject = e.streams[0];
-        pc.onicecandidate = ev => { if(ev.candidate) ws.send(JSON.stringify({type:"ice", target:"host", candidate:ev.candidate})) };
-
-        if(msg.type==="offer"){
-            await pc.setRemoteDescription(msg.offer);
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            ws.send(JSON.stringify({type:"answer", target:"host", answer}));
-        } else if(msg.type==="ice") await pc.addIceCandidate(msg.candidate);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({type:"offer", target:msg.id, offer}));
     }
+    else if(msg.type==="answer") {
+      await pcs[msg.id].setRemoteDescription(msg.answer);
+    }
+    else if(msg.type==="ice") {
+      await pcs[msg.id].addIceCandidate(msg.candidate);
+    }
+  } else {
+    // Viewer side
+    if(!window.pc) window.pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+    const pc = window.pc;
+
+    pc.ontrack = e => video.srcObject = e.streams[0];
+    pc.onicecandidate = ev => {
+      if(ev.candidate) ws.send(JSON.stringify({type:"ice", target:"host", candidate:ev.candidate}));
+    };
+
+    if(msg.type==="offer"){
+      await pc.setRemoteDescription(msg.offer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({type:"answer", target:"host", answer}));
+    } else if(msg.type==="ice") await pc.addIceCandidate(msg.candidate);
+  }
 };
 
 document.getElementById("shareBtn").onclick = async () => {
-    if(!isHost) return;
-    try{
-        const stream = await navigator.mediaDevices.getDisplayMedia({video:{width:1920,height:1080,frameRate:60}});
-        video.srcObject = stream;
-    } catch(err){ alert("Screen sharing failed: "+err.message) }
+  if(!isHost) return;
+  try{
+    const stream = await navigator.mediaDevices.getDisplayMedia({video:{width:1920,height:1080,frameRate:60}});
+    video.srcObject = stream;
+
+    // Add tracks to existing peer connections
+    for(const id in pcs){
+      const pc = pcs[id];
+      stream.getTracks().forEach(track => pc.addTrack(track, stream));
+    }
+
+  } catch(err){
+    alert("Screen sharing failed: "+err.message);
+  }
 };
 </script>
 

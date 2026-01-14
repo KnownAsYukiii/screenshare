@@ -1,62 +1,78 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Screen Share 1080p</title>
-  <style>
-    body {
-      background: #111;
-      color: #fff;
-      font-family: Arial, sans-serif;
-      text-align: center;
-    }
-    video {
-      width: 90%;
-      max-width: 1920px;
-      border: 2px solid #444;
-      margin-top: 20px;
-    }
-    button {
-      padding: 12px 20px;
-      font-size: 16px;
-      cursor: pointer;
-      margin-top: 20px;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Live Screen Share</title>
+<style>
+body { background:#111; color:#fff; font-family:Arial; text-align:center; }
+video { width:90%; max-width:1920px; margin-top:20px; border:2px solid #444; }
+button { padding:12px 20px; font-size:16px; cursor:pointer; margin-top:20px; }
+</style>
 </head>
 <body>
 
-  <h1>Live Screen Share (1080p)</h1>
-  <button onclick="startShare()">Start Screen Sharing</button>
+<h1 id="roleTitle"></h1>
+<button id="shareBtn">Start Screen Sharing</button>
+<video id="screenVideo" autoplay playsinline></video>
 
-  <br />
-  <video id="screenVideo" autoplay playsinline></video>
+<script>
+const isHost = location.hash === "#host";
+document.getElementById("roleTitle").innerText = isHost ? "Broadcaster" : "Viewer";
+if(!isHost) document.getElementById("shareBtn").style.display = "none";
 
-  <script>
-    async function startShare() {
-      try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            frameRate: { ideal: 60 }
-          },
-          audio: false
-        });
+const video = document.getElementById("screenVideo");
+const pcs = {};
+const room = "public-demo-room";
 
-        const video = document.getElementById("screenVideo");
-        video.srcObject = stream;
+// Free demo signaling server (WebSocket)
+const ws = new WebSocket("wss://demo.signalingserver.com"); // ⚠️ Replace with your server for production
 
-        // Stop handling
-        stream.getVideoTracks()[0].addEventListener("ended", () => {
-          video.srcObject = null;
-        });
+ws.onopen = () => {
+    ws.send(JSON.stringify({type:isHost?"host-join":"viewer-join", room}));
+};
 
-      } catch (err) {
-        alert("Screen sharing failed: " + err.message);
-      }
+ws.onmessage = async e => {
+    const msg = JSON.parse(e.data);
+
+    if(isHost){
+        if(msg.type === "viewer-join"){
+            const pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+            pcs[msg.id] = pc;
+
+            pc.onicecandidate = ev => { if(ev.candidate) ws.send(JSON.stringify({type:"ice", target:msg.id, candidate:ev.candidate})) };
+
+            video.srcObject.getTracks().forEach(track => pc.addTrack(track, video.srcObject));
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify({type:"offer", target:msg.id, offer}));
+        }
+        else if(msg.type==="answer") await pcs[msg.id].setRemoteDescription(msg.answer);
+        else if(msg.type==="ice") await pcs[msg.id].addIceCandidate(msg.candidate);
+    } else {
+        if(!window.pc) window.pc = new RTCPeerConnection({iceServers:[{urls:"stun:stun.l.google.com:19302"}]});
+        const pc = window.pc;
+
+        pc.ontrack = e => video.srcObject = e.streams[0];
+        pc.onicecandidate = ev => { if(ev.candidate) ws.send(JSON.stringify({type:"ice", target:"host", candidate:ev.candidate})) };
+
+        if(msg.type==="offer"){
+            await pc.setRemoteDescription(msg.offer);
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            ws.send(JSON.stringify({type:"answer", target:"host", answer}));
+        } else if(msg.type==="ice") await pc.addIceCandidate(msg.candidate);
     }
-  </script>
+};
+
+document.getElementById("shareBtn").onclick = async () => {
+    if(!isHost) return;
+    try{
+        const stream = await navigator.mediaDevices.getDisplayMedia({video:{width:1920,height:1080,frameRate:60}});
+        video.srcObject = stream;
+    } catch(err){ alert("Screen sharing failed: "+err.message) }
+};
+</script>
 
 </body>
 </html>
